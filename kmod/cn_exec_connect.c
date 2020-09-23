@@ -52,6 +52,8 @@ static asmlinkage int (*p_access_process_vm)(struct task_struct * tsk,
 					     void *buf, int len,
 					     unsigned int gup_flags) = NULL;
 
+struct cn_dev *p_cdev = NULL;
+
 #ifdef  EXEC_CACHE
 #define MAX_EXEC_EVENT 1024
 #define DEFAULT_EXEC_EVENT ((MAX_EXEC_EVENT)/2)
@@ -163,13 +165,13 @@ static inline void __send_msg(struct cn_msg *msg)
 	 */
 #if LINUX_VERSION_CODE < KERNEL_VERSION(3, 15, 0)
 	ret = cn_netlink_send(msg, CN_IDX_EXEC, GFP_NOWAIT);
-	if (ret == -ESRCH) {
+	if (ret == -ESRCH && netlink_has_listeners(p_cdev->nls, CN_IDX_EXEC) == 0) {
 		atomic_set(&exec_event_num_listeners, 0);
 		pr_debug("No listen process\n");
 	}
 #else
 	ret = cn_netlink_send(msg, atomic64_read(&portid_pid), 0, GFP_NOWAIT);
-	if (ret == -ECONNREFUSED) {
+	if (ret == -ECONNREFUSED && netlink_has_listeners(p_cdev->nls, CN_IDX_EXEC) == 0) {
 		pr_debug("Send msg to %lld fail.  no listen process\n", atomic64_read(&portid_pid));
 		atomic64_set(&portid_pid, 0);
 		//pr_debug("No listen process\n");
@@ -979,6 +981,12 @@ static int cn_exec_init(void)
 #endif
 	if (!p_access_process_vm) {
 		pr_debug("not find symbol 'access_process_vm'");
+		goto err_out;
+	}
+
+	p_cdev = (struct cn_dev *)kallsyms_lookup_name("cdev");
+	if (!p_cdev) {
+		pr_debug("not find symbol 'cdev'");
 		goto err_out;
 	}
 
