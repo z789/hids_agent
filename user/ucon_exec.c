@@ -178,12 +178,23 @@ end:
 	return date;
 }
 
+#ifdef EVENT_PID_NS
+int snprint_ns(char *out, int len, struct exec_namespace *ns)
+{
+	if (!out || len <= 0 || !ns)
+		return 0;
+
+	return snprintf(out, len, "pidns:%u netns:%u userns:%u utsns:%u mntns:%u ipcns:%u", 
+			ns->pid_ns, ns->net_ns, ns->user_ns, ns->uts_ns, ns->mnt_ns, ns->ipc_ns);
+}
+#endif
+
 static int out_event_exec(FILE * out, struct exec_event *ev)
 {
 	char *p_cmdline = NULL;
 	char *p_exe = NULL;
 	char s_cred[128] = { 0 };
-	unsigned int pid_ns = 0;
+	char ns[128] = { 0 };
 	int ret = -1;
 #ifdef KERN_CMDLINE
 	int j = 0;
@@ -222,7 +233,7 @@ static int out_event_exec(FILE * out, struct exec_event *ev)
 #endif
 
 #ifdef EVENT_PID_NS
-	pid_ns = ev->event_data.exec.pid_ns;
+	snprint_ns(ns, sizeof(ns), &ev->event_data.exec.ns);  
 #endif
 
 #ifdef KERN_HOSTNAME
@@ -242,7 +253,7 @@ static int out_event_exec(FILE * out, struct exec_event *ev)
 #endif
 
 	ret = fprintf(out, "%s monclock:%llu : EXEC: node:%s pid:%d tgid:%d ppid:%d ptgid:%d "
-		      "cred:%s pid_ns:%u comm:%s exe:%s cmdline:%s\n",
+		      "cred:%s ns:(%s) comm:%s exe:%s cmdline:%s\n",
 		      get_date(),
 		      ev->timestamp_ns,
 		      p_nodename,
@@ -250,7 +261,7 @@ static int out_event_exec(FILE * out, struct exec_event *ev)
 		      ev->event_data.exec.process_pid,
 		      ev->event_data.exec.process_tgid,
 		      ev->event_data.exec.parent_pid,
-		      ev->event_data.exec.parent_tgid, s_cred, pid_ns,
+		      ev->event_data.exec.parent_tgid, s_cred, ns,
 		      p_comm, p_exe, p_cmdline);
 	if (ret >= 0)
 		ret = 0;
@@ -318,8 +329,8 @@ static int out_event_pid_ns(FILE * out, struct exec_event *ev)
 	int ret = -1;
 	pid_t pid = 0;
 	pid_t tgid = 0;
-	unsigned int old_pid_ns = 0;
-	unsigned int new_pid_ns = 0;
+	char old_ns[128] = { 0 };
+	char new_ns[128] = { 0 };
 	char *p_exe = NULL;
 	char exe[MAX_LEN_CMDLINE] = { 0 };
 
@@ -333,8 +344,8 @@ static int out_event_pid_ns(FILE * out, struct exec_event *ev)
 
 	pid = ev->event_data.setns.process_pid;
 	tgid = ev->event_data.setns.process_tgid;
-	old_pid_ns = ev->event_data.setns.old_pid_ns;
-	new_pid_ns = ev->event_data.setns.new_pid_ns;
+	snprint_ns(old_ns, sizeof(old_ns), &ev->event_data.setns.old);
+	snprint_ns(new_ns, sizeof(new_ns), &ev->event_data.setns.new);
 
 #ifdef KERN_EXE
 	p_exe = ev->event_data.setns.exe;
@@ -356,8 +367,8 @@ static int out_event_pid_ns(FILE * out, struct exec_event *ev)
 #endif
 
 	ret = fprintf(out,
-		    "%s monclock:%llu : SETNS: node:%s pid:%d tgid:%d old_pidns:%u, new_pidns:%u, comm:%s exe:%s\n",
-		    get_date(), ev->timestamp_ns, p_nodename, pid, tgid, old_pid_ns, new_pid_ns, p_comm, p_exe);
+		    "%s monclock:%llu : SETNS: node:%s pid:%d tgid:%d old_ns(%s), new_ns(%s), comm:%s exe:%s\n",
+		    get_date(), ev->timestamp_ns, p_nodename, pid, tgid, old_ns, new_ns, p_comm, p_exe);
 
 	if (ret >= 0)
 		ret = 0;

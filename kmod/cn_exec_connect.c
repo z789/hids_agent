@@ -20,8 +20,13 @@
 #include <linux/sched/mm.h>
 #include <linux/mutex.h>
 #include <linux/binfmts.h>
+#include <linux/nsproxy.h>
 #include <linux/pid_namespace.h>
+#include <linux/ipc_namespace.h>
+#include <linux/user_namespace.h>
+#include <linux/utsname.h>
 #include <linux/rcupdate.h>
+#include <mount.h>
 #include <cn_exec.h>
 #include <ftrace_hook.h>
 
@@ -371,31 +376,50 @@ static inline void get_kernel_cred(struct exec_cred *c,
 #endif
 
 #ifdef EVENT_PID_NS
-static inline unsigned int get_kernel_pid_ns(struct task_struct *task)
+static inline int assign_ns(struct exec_namespace *exec_ns, struct nsproxy *ns)
 {
-	struct pid_namespace *ns = NULL;
-	unsigned int inum = 0;
+	if (!exec_ns || !ns)
+		return -EINVAL;
 
-	if (!task)
+	exec_ns->net_ns = ns->net_ns->proc_inum;
+	exec_ns->uts_ns = ns->uts_ns->proc_inum;
+	exec_ns->ipc_ns = ns->ipc_ns->proc_inum;
+	exec_ns->mnt_ns = ns->mnt_ns->proc_inum;
+	exec_ns->user_ns = ns->mnt_ns->user_ns->proc_inum;
+
+	return 0;
+}
+
+static inline unsigned int get_task_ns(struct exec_namespace *ns, struct task_struct *task)
+{
+	struct pid_namespace *pid_ns = NULL;
+	int ret = -1;
+
+	if (!ns || !task)
 		goto end;
 
 	rcu_read_lock();
-	ns = task_active_pid_ns(task);
-	if (ns)
-		get_pid_ns(ns);
+	pid_ns = task_active_pid_ns(task);
+	if (pid_ns)
+		get_pid_ns(pid_ns);
 	rcu_read_unlock();
-	if (!ns)
+	if (!pid_ns)
 		goto end;
 
+	task_lock(task);
+	assign_ns(ns, task->nsproxy);
+	task_unlock(task);
+
 #if LINUX_VERSION_CODE < KERNEL_VERSION(3, 19, 0)
-	inum = ns->proc_inum;
+	ns->pid_ns = pid_ns->proc_inum;
 #else
-	inum = ns->ns.inum;
+	ns->pid_ns = pid_ns->ns.inum;
 #endif
-	put_pid_ns(ns);
+	put_pid_ns(pid_ns);
+	ret = 0;
 
 end:
-	return inum;
+	return ret;
 }
 #endif
 
@@ -664,6 +688,45 @@ static asmlinkage int fh_security_mmap_file(struct file *file,
 #endif
 
 #ifdef EVENT_PID_NS
+static inline int fill_ns(struct __setns_event *setns, struct nsproxy *new, struct task_struct *task)
+{
+	struct nsproxy *ns = NULL;
+	struct pid_namespace *pid_ns = NULL;
+	int ret = -1;
+
+	if (!setns || !task)
+		goto end;
+
+	rcu_read_lock();
+	pid_ns = task_active_pid_ns(task);
+	if (pid_ns)
+		get_pid_ns(pid_ns);
+	rcu_read_unlock();
+	if (!pid_ns)
+		goto end;
+
+	task_lock(task);
+	ns = task->nsproxy;
+	assign_ns(&setns->old, ns);
+	assign_ns(&setns->new, new);
+	task_unlock(task);
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 19, 0)
+	setns->old.pid_ns = pid_ns->proc_inum;
+	setns->new.pid_ns = new->pid_ns->proc_inum;
+#else
+	setns->old.pid_ns = pid_ns->ns.inum;
+	setns->new.pid_ns = new->pid_ns_for_children->ns.inum;
+#endif
+	ret = 0;
+
+end:    
+	if (pid_ns)
+		put_pid_ns(pid_ns);
+
+	return ret;
+}
+
 static asmlinkage void (*real_switch_task_namespaces)(
 				struct task_struct *task, struct nsproxy *new) = NULL;
 static asmlinkage void fh_switch_task_namespaces(
@@ -671,8 +734,6 @@ static asmlinkage void fh_switch_task_namespaces(
 {
 	struct cn_msg *msg = NULL;
 	struct exec_event *ev = NULL;
-	//struct nsproxy *ns = NULL;
-	struct pid_namespace *ns = NULL;
 #ifndef EXEC_CACHE
 	__u8 buffer[CN_EXEC_MSG_SIZE] __aligned(8);
 #endif
@@ -685,14 +746,6 @@ static asmlinkage void fh_switch_task_namespaces(
 		goto  real_switch_ns;
 #endif
 	if (!task || !new)
-		goto  real_switch_ns;
-
-	rcu_read_lock();
-	ns = task_active_pid_ns(task);
-	if (ns)
-		get_pid_ns(ns);
-	rcu_read_unlock();
-	if (!ns)
 		goto  real_switch_ns;
 
 #ifdef EXEC_CACHE
@@ -711,14 +764,9 @@ static asmlinkage void fh_switch_task_namespaces(
 	ev->what = PROC_EVENT_SETNS;
 	ev->event_data.setns.process_pid = task->pid;
 	ev->event_data.setns.process_tgid = task->tgid;
-
-#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 19, 0)
-	ev->event_data.setns.old_pid_ns = ns->proc_inum;
-	ev->event_data.setns.new_pid_ns = new->pid_ns->proc_inum;
-#else
-	ev->event_data.setns.old_pid_ns = ns->ns.inum;
-	ev->event_data.setns.new_pid_ns = new->pid_ns_for_children->ns.inum;
-#endif
+	
+	if (fill_ns(&ev->event_data.setns, new, task) < 0)
+		goto  real_switch_ns;
 
 #ifdef KERN_COMM
 	get_task_comm(ev->event_data.setns.comm, task);
@@ -754,8 +802,6 @@ static asmlinkage void fh_switch_task_namespaces(
 #endif
 
 real_switch_ns:
-	if (ns)
-		put_pid_ns(ns);
 	return real_switch_task_namespaces(task, new);
 }
 #endif
@@ -823,7 +869,7 @@ static asmlinkage int fh_proc_exec_connector(struct task_struct *tsk)
 #endif
 
 #ifdef EVENT_PID_NS
-	ev->event_data.exec.pid_ns = get_kernel_pid_ns(task);
+	get_task_ns(&ev->event_data.exec.ns, task);
 #endif
 
 #ifdef KERN_HOSTNAME

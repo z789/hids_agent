@@ -36,6 +36,15 @@ struct exec_cred {
 };
 #endif
 
+struct exec_namespace {
+	unsigned int pid_ns;
+	unsigned int net_ns;
+	unsigned int user_ns;
+	unsigned int uts_ns;
+	unsigned int mnt_ns;
+	unsigned int ipc_ns;
+};
+
 struct exec_event {
 	int what;
 	__u32 cpu;
@@ -72,7 +81,7 @@ struct exec_event {
 			struct exec_cred cred;
 #endif
 #ifdef EVENT_PID_NS
-			unsigned int pid_ns;
+			struct exec_namespace ns;
 #endif
 
 #ifdef KERN_HOSTNAME
@@ -118,8 +127,8 @@ struct exec_event {
 		struct __setns_event {
 			__kernel_pid_t process_pid;
 			__kernel_pid_t process_tgid;
-			unsigned int old_pid_ns;
-			unsigned int new_pid_ns;
+			struct exec_namespace old;
+			struct exec_namespace new;
 			char comm[16];
 #ifdef KERN_EXE
 			char exe[MAX_LEN_EXE_NAME];
