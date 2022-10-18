@@ -17,16 +17,22 @@
 #include <uapi/linux/in.h>
 #include <ftrace_hook.h>
 
+unsigned long find_kallsyms_addr(const char *name);
+
 /*
  * There are two ways of preventing vicious recursive loops when hooking:
  * - detect recusion using function return address (USE_FENTRY_OFFSET = 0)
  * - avoid recusion by jumping over the ftrace call (USE_FENTRY_OFFSET = 1)
  */
+#ifdef USE_FENTRY_OFFSET_0
 #define USE_FENTRY_OFFSET 0
+#else
+#define USE_FENTRY_OFFSET 1
+#endif
 
 static int fh_resolve_hook_address(struct ftrace_hook *hook)
 {
-	hook->address = kallsyms_lookup_name(hook->name);
+	hook->address = find_kallsyms_addr(hook->name);
 
 	if (!hook->address) {
 		pr_debug("unresolved symbol: %s\n", hook->name);
@@ -41,6 +47,7 @@ static int fh_resolve_hook_address(struct ftrace_hook *hook)
 	return 0;
 }
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,11,1)
 static void notrace fh_ftrace_thunk(unsigned long ip, unsigned long parent_ip,
 				    struct ftrace_ops *ops,
 				    struct pt_regs *regs)
@@ -54,6 +61,21 @@ static void notrace fh_ftrace_thunk(unsigned long ip, unsigned long parent_ip,
 		regs->ip = (unsigned long)hook->function;
 #endif
 }
+#else
+static void notrace fh_ftrace_thunk(unsigned long ip, unsigned long parent_ip,
+				    struct ftrace_ops *ops,
+				    struct ftrace_regs *regs)
+{
+	struct ftrace_hook *hook = container_of(ops, struct ftrace_hook, ops);
+
+#if USE_FENTRY_OFFSET
+	regs->regs.ip = (unsigned long)hook->function;
+#else
+	if (!within_module_core(parent_ip, THIS_MODULE))
+		regs->regs.ip = (unsigned long)hook->function;
+#endif
+}
+#endif
 
 /**
  * fh_install_hook() - register and enable a single hook
@@ -63,11 +85,13 @@ static void notrace fh_ftrace_thunk(unsigned long ip, unsigned long parent_ip,
  */
 int fh_install_hook(struct ftrace_hook *hook)
 {
+	unsigned long flags = 0;
 	int err;
 
 	err = fh_resolve_hook_address(hook);
 	if (err)
 		return err;
+
 
 	/*
 	 * We're going to modify %rip register so we'll need IPMODIFY flag
@@ -75,9 +99,16 @@ int fh_install_hook(struct ftrace_hook *hook)
 	 * is useless if we change %rip so disable it with RECURSION_SAFE.
 	 * We'll perform our own checks for trace function reentry.
 	 */
-	hook->ops.func = fh_ftrace_thunk;
-	hook->ops.flags = FTRACE_OPS_FL_SAVE_REGS
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,11,1)
+	flags = FTRACE_OPS_FL_SAVE_REGS
 	    | FTRACE_OPS_FL_RECURSION_SAFE | FTRACE_OPS_FL_IPMODIFY;
+#else
+	flags = FTRACE_OPS_FL_SAVE_REGS
+	    | FTRACE_OPS_FL_RECURSION | FTRACE_OPS_FL_IPMODIFY;
+#endif
+
+	hook->ops.func = fh_ftrace_thunk;
+	hook->ops.flags = flags;
 
 	err = ftrace_set_filter_ip(&hook->ops, hook->address, 0, 0);
 	if (err) {

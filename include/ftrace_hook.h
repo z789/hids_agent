@@ -39,7 +39,7 @@ struct ftrace_hook {
 
 #define HOOK(_name, _function, _original)	\
 	{					\
-		.name = SYSCALL_NAME(_name),	\
+		.name = (_name),	        \
 		.function = (_function),	\
 		.original = (_original),	\
 	}

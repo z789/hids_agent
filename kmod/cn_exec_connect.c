@@ -30,6 +30,10 @@
 #include <cn_exec.h>
 #include <ftrace_hook.h>
 
+#ifdef USE_FENTRY_OFFSET_0
+#pragma GCC optimize("-fno-optimize-sibling-calls")
+#endif
+
 #define CN_EXEC_MSG_SIZE (sizeof(struct cn_msg) + sizeof(struct exec_event) + 4)
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(3, 15, 0)
@@ -51,6 +55,8 @@ static asmlinkage int (*p_access_process_vm)(struct task_struct * tsk,
 					     unsigned long addr,
 					     void *buf, int len,
 					     unsigned int gup_flags) = NULL;
+
+static struct file *(*p_get_task_exe_file)(struct task_struct *task) = NULL;
 
 struct cn_dev *p_cdev = NULL;
 
@@ -268,6 +274,49 @@ static void cn_exec_mcast_ctl(struct cn_msg *msg, struct netlink_skb_parms *nsp)
 	cn_exec_ack(err, msg->seq, msg->ack);
 }
 
+/*
+ No export the func <kallsyms_lookup_name> from v5.7.1
+*/
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 7, 1)
+unsigned long find_kallsyms_addr(const char *name)
+{
+	return kallsyms_lookup_name(name);
+}
+#else
+
+/* Symbol table format returned by kallsyms. */
+typedef struct __ksymtab {
+	unsigned long value;    /* Address of symbol */
+	const char *mod_name;   /* Module containing symbol or
+				 * "kernel" */
+	unsigned long mod_start;
+	unsigned long mod_end;
+	const char *sec_name;   /* Section containing symbol */
+	unsigned long sec_start;
+	unsigned long sec_end;
+	const char *sym_name;   /* Full symbol name, including
+				 * any version */
+	unsigned long sym_start;
+	unsigned long sym_end;
+} kdb_symtab_t;
+
+int kdbgetsymval(const char *symname, kdb_symtab_t *symtab);
+
+unsigned long find_kallsyms_addr(const char *name)
+{
+        kdb_symtab_t symtab; 
+        unsigned long addr = 0;
+        if (!name)
+                goto end;
+
+        if (kdbgetsymval(name, &symtab))
+                addr = symtab.sym_start;
+end:
+        return addr;
+
+}
+#endif
+
 #ifdef KERN_EXE
 static int get_task_exe(char *buf, int buflen, struct task_struct *task)
 {
@@ -279,7 +328,7 @@ static int get_task_exe(char *buf, int buflen, struct task_struct *task)
 	if (!buf || buflen <= 0 || !task || !pathname)
 		goto end;
 
-	exe_file = get_task_exe_file(task);
+	exe_file = p_get_task_exe_file(task);
 	if (exe_file) {
 		p = d_path(&(exe_file->f_path), pathname, PATH_MAX+11);
 		fput(exe_file);
@@ -315,12 +364,21 @@ static int get_task_cmdline(char *buffer, int buflen, struct task_struct *task)
 	if (!mm->arg_end)
 		goto out_mm;
 
+
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(5,2,1)
 	down_read(&mm->mmap_sem);
+#else
+	spin_lock(&mm->arg_lock);
+#endif
 	arg_start = mm->arg_start;
 	arg_end = mm->arg_end;
 	env_start = mm->env_start;
 	env_end = mm->env_end;
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(5,2,1)
 	up_read(&mm->mmap_sem);
+#else
+	spin_unlock(&mm->arg_lock);
+#endif
 
 	len = arg_end - arg_start;
 
@@ -383,11 +441,19 @@ static inline int assign_ns(struct exec_namespace *exec_ns, struct nsproxy *ns)
 	if (!exec_ns || !ns)
 		return -EINVAL;
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 19, 0)
 	exec_ns->net_ns = ns->net_ns->proc_inum;
 	exec_ns->uts_ns = ns->uts_ns->proc_inum;
 	exec_ns->ipc_ns = ns->ipc_ns->proc_inum;
 	exec_ns->mnt_ns = ns->mnt_ns->proc_inum;
 	exec_ns->user_ns = ns->mnt_ns->user_ns->proc_inum;
+#else
+	exec_ns->net_ns = ns->net_ns->ns.inum;
+	exec_ns->uts_ns = ns->uts_ns->ns.inum;
+	exec_ns->ipc_ns = ns->ipc_ns->ns.inum;
+	exec_ns->mnt_ns = ns->mnt_ns->ns.inum;
+	exec_ns->user_ns = ns->mnt_ns->user_ns->ns.inum;
+#endif
 
 	return 0;
 }
@@ -976,7 +1042,7 @@ static int cn_exec_init(void)
 #else
 	p_access_process_vm = (int (*)(struct task_struct *, unsigned long addr,
 				       void *, int, unsigned int))
-	    kallsyms_lookup_name("access_process_vm");
+	    find_kallsyms_addr("access_process_vm");
 
 #endif
 	if (!p_access_process_vm) {
@@ -984,7 +1050,18 @@ static int cn_exec_init(void)
 		goto err_out;
 	}
 
-	p_cdev = (struct cn_dev *)kallsyms_lookup_name("cdev");
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 15, 1)
+	p_get_task_exe_file = get_task_exe_file;
+#else
+	p_get_task_exe_file = (struct file* (*)(struct task_struct *task))
+		find_kallsyms_addr("get_task_exe_file");
+#endif
+	if (!p_get_task_exe_file) {
+		pr_debug("not find symbol 'get_task_exe_file'");
+		goto err_out;
+	}
+
+	p_cdev = (struct cn_dev *)find_kallsyms_addr("cdev");
 	if (!p_cdev) {
 		pr_debug("not find symbol 'cdev'");
 		goto err_out;

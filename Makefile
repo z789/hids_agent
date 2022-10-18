@@ -7,20 +7,23 @@
 
 #macro EVENT_CONNECT: get connect event from kernel
 #macro EVENT_MMAP:    get mmap event from kernel
+#macro EVENT_PID_NS:  get namespaces from kernel
 #macro KERN_HOSTNAME: get hostname from kernel
 
 #CFLAGS += -DKERN_COMM -DKERN_CMDLINE -DKERN_EXE -DKERN_CRED -DEVENT_CONNECT -DEVENT_MMAP -DEXEC_CACHE 
-CFLAGS += -DKERN_CMDLINE -DKERN_EXE -DKERN_CRED -DEVENT_CONNECT -DEVENT_PID_NS -DKERN_HOSTNAME -DEXEC_CACHE 
+#CFLAGS += -DKERN_CMDLINE -DKERN_EXE -DKERN_CRED -DEVENT_CONNECT -DEVENT_PID_NS -DKERN_HOSTNAME -DEXEC_CACHE 
+CFLAGS += -DKERN_COMM -DKERN_CMDLINE -DKERN_EXE -DKERN_CRED -DEVENT_CONNECT -DEVENT_PID_NS -DEVENT_MMAP -DKERN_HOSTNAME -DEXEC_CACHE 
 #CFLAGS += -DKERN_CMDLINE -DKERN_EXE -DKERN_CRED  
-#CFLAGS += -DEVENT_CONNECT 
 CFLAGS += -fstack-protector-strong  -Wall
 export CFLAGS
 
 all: 
+	./check_file.sh
 	cd kmod && make && cd ..
 	cd user && make && cd ..
 
 clean:
 	cd kmod && make clean && cd ..
 	cd user && make clean && cd ..
+	rm include/mount.h
 

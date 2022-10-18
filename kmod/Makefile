@@ -1,4 +1,4 @@
-EXTRA_CFLAGS += $(CFLAGS) -I$(PWD)/../include  -Wall
+EXTRA_CFLAGS += $(CFLAGS) -I$(PWD)/../include  -Wall  -DUSE_FENTRY_OFFSET_0
 
 ifneq ($(KERNELRELEASE),)
         obj-m := cn_exec.o
