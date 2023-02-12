@@ -312,9 +312,9 @@ static int out_event_connect(FILE * out, struct exec_event *ev)
 #endif
 
 	ret = fprintf(out,
-		    "%s monclock:%llu : CONNECT: node:%s pid:%d tgid:%d comm:%s exe:%s addr:%s:%d\n",
+		    "%s monclock:%llu : CONNECT: node:%s pid:%d tgid:%d comm:%s exe:%s addr:%s:%d prot:%s\n",
 		    get_date(), ev->timestamp_ns, p_nodename, pid, tgid, p_comm, p_exe,
-		    inet_ntoa(addr->sin_addr), ntohs(addr->sin_port));
+		    inet_ntoa(addr->sin_addr), ntohs(addr->sin_port), ev->event_data.connect.prot_name);
 
 	if (ret >= 0)
 		ret = 0;

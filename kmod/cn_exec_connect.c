@@ -284,6 +284,7 @@ unsigned long find_kallsyms_addr(const char *name)
 }
 #else
 
+#ifdef CONFIG_KGDB_KDB
 /* Symbol table format returned by kallsyms. */
 typedef struct __ksymtab {
 	unsigned long value;    /* Address of symbol */
@@ -301,16 +302,51 @@ typedef struct __ksymtab {
 } kdb_symtab_t;
 
 int kdbgetsymval(const char *symname, kdb_symtab_t *symtab);
+#endif
+
+struct kprobe kp;
+
+static int __kprobes pre_handler(struct kprobe *p, struct pt_regs *regs)
+{
+	return 0;
+}
+
+static void __kprobes post_handler(struct kprobe *p, struct pt_regs *regs,
+                                unsigned long flags)
+{
+	return;
+}
 
 unsigned long find_kallsyms_addr(const char *name)
 {
+#ifdef CONFIG_KGDB_KDB
         kdb_symtab_t symtab; 
+#endif
         unsigned long addr = 0;
         if (!name)
                 goto end;
 
-        if (kdbgetsymval(name, &symtab))
+#ifdef CONFIG_KGDB_KDB
+        if (kdbgetsymval(name, &symtab)) {
                 addr = symtab.sym_start;
+	} else {
+#endif
+		addr = (unsigned long )__symbol_get(name);
+		if (addr <= 0) {
+			kp.symbol_name = name;
+			kp.offset = 0;
+			kp.addr = 0;
+			kp.pre_handler = pre_handler;
+			kp.post_handler = post_handler;
+			if (register_kprobe(&kp) == 0) {
+				addr = (unsigned long) kp.addr;
+				unregister_kprobe(&kp);
+			}
+			addr = (unsigned long) kp.addr;
+		}
+#ifdef CONFIG_KGDB_KDB
+	}
+#endif 
 end:
         return addr;
 
@@ -597,6 +633,7 @@ static asmlinkage int fh_ss_connect(struct socket *sock,
 	ev->event_data.connect.process_tgid = current->tgid;
 	memcpy(&(ev->event_data.connect.addr), address, addrlen);
 	ev->event_data.connect.addrlen = addrlen;
+	strlcpy(ev->event_data.connect.prot_name, sock->sk->sk_prot->name, sizeof(ev->event_data.connect.prot_name));
 
 #ifdef KERN_COMM
 	get_task_comm(ev->event_data.connect.comm, task);

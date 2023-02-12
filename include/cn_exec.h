@@ -95,6 +95,7 @@ struct exec_event {
 			__kernel_pid_t process_tgid;
 			struct sockaddr addr;
 			int addrlen;
+			char prot_name[32];
 #ifdef KERN_COMM
 			char comm[16];
 #endif
