@@ -29,6 +29,7 @@
 #include <mount.h>
 #include <cn_exec.h>
 #include <ftrace_hook.h>
+#include <module-internal.h>
 
 #ifdef USE_FENTRY_OFFSET_0
 #pragma GCC optimize("-fno-optimize-sibling-calls")
@@ -177,7 +178,7 @@ static inline void __send_msg(struct cn_msg *msg)
 	}
 #else
 	ret = cn_netlink_send(msg, atomic64_read(&portid_pid), 0, GFP_NOWAIT);
-	if (ret == -ECONNREFUSED && netlink_has_listeners(p_cdev->nls, CN_IDX_EXEC) == 0) {
+	if ((ret == -ESRCH || ret == -ECONNREFUSED) && netlink_has_listeners(p_cdev->nls, CN_IDX_EXEC) == 0) {
 		pr_debug("Send msg to %lld fail.  no listen process\n", atomic64_read(&portid_pid));
 		atomic64_set(&portid_pid, 0);
 		//pr_debug("No listen process\n");
@@ -264,7 +265,7 @@ static void cn_exec_mcast_ctl(struct cn_msg *msg, struct netlink_skb_parms *nsp)
 		break;
 	}
 #else
-	if (atomic64_read(&portid_pid) == 0){
+	if (atomic64_read(&portid_pid) == 0 || netlink_has_listeners(p_cdev->nls, CN_IDX_EXEC) == 1){
 		atomic64_set(&portid_pid, nsp->portid);
 		pr_debug("Process %lld listen\n", atomic64_read(&portid_pid));
 	}
@@ -564,6 +565,14 @@ static asmlinkage int (*real_security_mmap_file)(struct pt_regs * regs) = NULL;
 static asmlinkage int fh_security_mmap_file(struct pt_regs *regs)
 {
 	return real_security_mmap_file(regs);
+}
+#endif
+
+#ifdef EVENT_KMOD
+static asmlinkage struct module* (*real_layout_and_allocate)(struct pt_regs *regs) = NULL;
+static asmlinkage struct module* (*fh_layout_and_allocate)(struct pt_regs *regs)
+{
+	return real_layout_and_allocate(regs);
 }
 #endif
 
@@ -882,6 +891,10 @@ static asmlinkage void fh_switch_task_namespaces(
 		     sizeof(ev->event_data.setns.exe) - 1, task);
 #endif
 
+#ifdef KERN_HOSTNAME
+	get_kernel_nodename(ev->event_data.setns.nodename, sizeof(ev->event_data.setns.nodename));
+#endif
+
 	ev->seq = atomic64_inc_return(&seq_exec_event);
 	preempt_disable();
 	ev->cpu = smp_processor_id();
@@ -1008,6 +1021,72 @@ static asmlinkage int fh_proc_exec_connector(struct task_struct *tsk)
  real_proc_exec_connector:
 	return real_proc_exec_connector(tsk);
 }
+
+#ifdef EVENT_KMOD
+static asmlinkage struct module* (*real_layout_and_allocate)(struct load_info *info, int flags) = NULL;
+static asmlinkage struct module* fh_layout_and_allocate(struct load_info *info, int flags)
+{
+	struct cn_msg *msg;
+	struct exec_event *ev;
+#ifndef EXEC_CACHE
+	__u8 buffer[CN_EXEC_MSG_SIZE] __aligned(8);
+#endif
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 15, 0)
+	if (atomic_read(&exec_event_num_listeners) < 1)
+		goto real_layout_and_allocate;
+#else
+	if (atomic64_read(&portid_pid) < 1)
+		goto real_layout_and_allocate;
+#endif
+
+#ifdef EXEC_CACHE
+	mutex_lock(&event_cache_mutex);
+	msg = buffer_to_cn_msg(event_cache->buf);
+	ev = get_exec_event(event_cache);
+	if (!ev)
+		goto events_send;
+#else
+	msg = buffer_to_cn_msg(buffer);
+	ev = (struct exec_event *)msg->data;
+#endif
+
+	memset(&ev->event_data, 0, sizeof(ev->event_data));
+	ev->timestamp_ns = ktime_get_ns();
+	ev->what = PROC_EVENT_KMOD;
+	ev->event_data.kmod.process_pid = current->pid;
+	ev->event_data.kmod.process_tgid = current->tgid;
+	strlcpy(ev->event_data.kmod.name, info->name, sizeof(ev->event_data.kmod.name));
+
+#ifdef KERN_HOSTNAME
+	get_kernel_nodename(ev->event_data.kmod.nodename, sizeof(ev->event_data.kmod.nodename));
+#endif
+	ev->seq = atomic64_inc_return(&seq_exec_event);
+	preempt_disable();
+	ev->cpu = smp_processor_id();
+	preempt_enable();
+
+#ifdef EXEC_CACHE
+	if (++(event_cache->cnt) < g_num_cache_ev)
+		goto end;
+ events_send:
+#endif
+	memcpy(&msg->id, &cn_exec_id, sizeof(msg->id));
+	msg->ack = 0;		/* not used */
+	msg->flags = 0;		/* not used */
+#ifdef EXEC_CACHE
+	msg->len = sizeof(*ev) * event_cache->cnt;
+	__send_msg(msg);
+	event_cache->cnt = 0;
+ end:
+	mutex_unlock(&event_cache_mutex);
+#else
+	msg->len = sizeof(*ev);
+	send_msg(msg);
+#endif
+real_layout_and_allocate:
+	return real_layout_and_allocate(info, flags);
+}
+#endif
 #endif				// PTREGS_SYSCALL_STUBS
 
 #ifdef EXEC_CACHE
@@ -1047,6 +1126,10 @@ static struct ftrace_hook hooks[] = {
 #ifdef EVENT_PID_NS
 	HOOK("switch_task_namespaces", fh_switch_task_namespaces,
 	     &real_switch_task_namespaces),
+#endif
+
+#ifdef EVENT_KMOD
+	HOOK("layout_and_allocate", fh_layout_and_allocate, &real_layout_and_allocate),
 #endif
 };
 

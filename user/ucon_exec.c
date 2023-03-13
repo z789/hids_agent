@@ -359,7 +359,7 @@ static int out_event_pid_ns(FILE * out, struct exec_event *ev)
 #endif
 
 #ifdef KERN_HOSTNAME
-	p_nodename = ev->event_data.connect.nodename;
+	p_nodename = ev->event_data.setns.nodename;
 #endif
 
 #ifdef KERN_COMM
@@ -398,7 +398,7 @@ static int out_event_mmap(FILE * out, struct exec_event *ev)
 	path = ev->event_data.mmap.path;
 
 #ifdef KERN_HOSTNAME
-	p_nodename = ev->event_data.connect.nodename;
+	p_nodename = ev->event_data.mmap.nodename;
 #endif
 
 #ifdef KERN_COMM
@@ -407,6 +407,37 @@ static int out_event_mmap(FILE * out, struct exec_event *ev)
 
 	ret = fprintf(out, "%s monclock:%llu : MMAP: node:%s pid:%d tgid:%d comm:%s path:%s\n",
 		      get_date(), ev->timestamp_ns, p_nodename, pid, tgid, p_comm, path);
+
+	if (ret >= 0)
+		ret = 0;
+
+	return ret;
+}
+#endif
+
+#ifdef EVENT_KMOD
+static int out_event_kmod(FILE * out, struct exec_event *ev)
+{
+	int ret = -1;
+	pid_t pid = 0;
+	pid_t tgid = 0;
+	char nodename[1] = {0};
+	char *p_nodename = nodename;
+	char *name = NULL;
+
+	if (!ev)
+		return ret;
+
+	pid = ev->event_data.kmod.process_pid;
+	tgid = ev->event_data.kmod.process_tgid;
+	name = ev->event_data.kmod.name;
+
+#ifdef KERN_HOSTNAME
+	p_nodename = ev->event_data.kmod.nodename;
+#endif
+	ret = fprintf(out,
+		    "%s monclock:%llu : KMOD: node:%s pid:%d tgid:%d ko_name:%s\n",
+		    get_date(), ev->timestamp_ns, p_nodename, pid, tgid, name);
 
 	if (ret >= 0)
 		ret = 0;
@@ -645,6 +676,11 @@ int main_loop(int s, FILE * out)
 #ifdef EVENT_MMAP
 				case PROC_EVENT_MMAP:
 					out_event_mmap(out, ev);
+					break;
+#endif
+#ifdef EVENT_KMOD
+				case PROC_EVENT_KMOD:
+					out_event_kmod(out, ev);
 					break;
 #endif
 				case PROC_EVENT_NONE:

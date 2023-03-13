@@ -4,6 +4,10 @@
 #include <linux/cn_proc.h>
 #include <linux/utsname.h>
 
+#ifndef MODULE_NAME_LEN
+#define MODULE_NAME_LEN (64 - sizeof(unsigned long))
+#endif
+
 #define CN_IDX_EXEC (CN_NETLINK_USERS+4)
 #define CN_VAL_EXEC 0x100
 
@@ -21,6 +25,10 @@
 
 #ifdef  EVENT_PID_NS
 #define PROC_EVENT_SETNS 0x00001000
+#endif
+
+#ifdef  EVENT_KMOD
+#define PROC_EVENT_KMOD 0x00002000
 #endif
 
 #ifdef KERN_CRED
@@ -134,7 +142,21 @@ struct exec_event {
 #ifdef KERN_EXE
 			char exe[MAX_LEN_EXE_NAME];
 #endif
+#ifdef KERN_HOSTNAME
+			char nodename[__NEW_UTS_LEN+1];
+#endif
 		} setns;
+#endif
+
+#ifdef EVENT_KMOD
+		struct __kmod_event {
+			__kernel_pid_t process_pid;
+			__kernel_pid_t process_tgid;
+			char name[MODULE_NAME_LEN];
+#ifdef KERN_HOSTNAME
+			char nodename[__NEW_UTS_LEN+1];
+#endif
+		} kmod;
 #endif
 
 	} event_data;
