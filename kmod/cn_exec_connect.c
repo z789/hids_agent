@@ -30,6 +30,7 @@
 #include <cn_exec.h>
 #include <ftrace_hook.h>
 #include <module-internal.h>
+#include <net/inet_sock.h>
 
 #ifdef USE_FENTRY_OFFSET_0
 #pragma GCC optimize("-fno-optimize-sibling-calls")
@@ -560,6 +561,14 @@ static asmlinkage int fh_ss_connect(struct pt_regs *regs)
 }
 #endif
 
+#ifdef EVENT_SEND
+static asmlinkage int (*real_sock_sendmsg)(struct pt_regs * regs) = NULL;
+static asmlinkage int fh_sock_sendmsg(struct pt_regs * regs)
+{
+	return real_sock_sendmsg(regs);
+}
+#endif
+
 #ifdef EVENT_MMAP
 static asmlinkage int (*real_security_mmap_file)(struct pt_regs * regs) = NULL;
 static asmlinkage int fh_security_mmap_file(struct pt_regs *regs)
@@ -569,10 +578,10 @@ static asmlinkage int fh_security_mmap_file(struct pt_regs *regs)
 #endif
 
 #ifdef EVENT_KMOD
-static asmlinkage struct module* (*real_layout_and_allocate)(struct pt_regs *regs) = NULL;
-static asmlinkage struct module* (*fh_layout_and_allocate)(struct pt_regs *regs)
+static asmlinkage struct module* (*real___audit_log_kern_module)(struct pt_regs *regs) = NULL;
+static asmlinkage struct module* (*fh___audit_log_kern_module)(struct pt_regs *regs)
 {
-	return real_layout_and_allocate(regs);
+	return real___audit_log_kern_module(regs);
 }
 #endif
 
@@ -684,6 +693,112 @@ static asmlinkage int fh_ss_connect(struct socket *sock,
  real_connect:
 	ret = real_ss_connect(sock, address, addrlen);
 
+	return ret;
+}
+#endif
+
+#ifdef EVENT_SEND
+static asmlinkage int (*real_sock_sendmsg)(struct socket *sock,
+	       				struct msghdr *msg) = NULL;
+static asmlinkage int fh_sock_sendmsg(struct socket *sock,
+	       				struct msghdr *msghdr)
+{
+	int ret;
+	//struct sockaddr_in *addr = (struct sockaddr_in *) address;
+	struct cn_msg *msg;
+	struct exec_event *ev;
+	struct task_struct *task = current;
+	struct sock *sk = sock->sk;
+	struct inet_sock *inet = inet_sk(sk);
+	int family = sk->sk_family;
+#ifndef EXEC_CACHE
+	__u8 buffer[CN_EXEC_MSG_SIZE] __aligned(8);
+#endif
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 15, 0)
+	if (atomic_read(&exec_event_num_listeners) < 1)
+		goto real_sock_sendmsg;
+#else
+	if (atomic64_read(&portid_pid) < 1)
+		goto real_sock_sendmsg;
+#endif
+	if (sk->sk_kern_sock || sk->sk_protocol != IPPROTO_UDP
+	       || sk->sk_state == TCP_ESTABLISHED || inet->inet_num 
+	       || msghdr->msg_name == NULL)
+		goto real_sock_sendmsg;
+
+	/* first send msg */
+	if (refcount_read(&sk->sk_wmem_alloc) != 1)
+		goto real_sock_sendmsg;
+
+	if (family != AF_INET && family != AF_INET6)
+		goto real_sock_sendmsg;
+
+	/*
+	   may be filter 127.0.0.1 
+	 */
+
+#ifdef EXEC_CACHE
+	mutex_lock(&event_cache_mutex);
+	msg = buffer_to_cn_msg(event_cache->buf);
+	ev = get_exec_event(event_cache);
+	if (!ev)
+		goto events_send;
+#else
+	msg = buffer_to_cn_msg(buffer);
+	ev = (struct exec_event *)msg->data;
+#endif
+
+	memset(&ev->event_data, 0, sizeof(ev->event_data));
+	ev->timestamp_ns = ktime_get_ns();
+	ev->what = PROC_EVENT_SEND;
+	ev->event_data.send.process_pid = current->pid;
+	ev->event_data.send.process_tgid = current->tgid;
+	ev->event_data.send.family = family;
+	memcpy(&(ev->event_data.send.addr), msghdr->msg_name, msghdr->msg_namelen);
+	ev->event_data.send.addrlen = msghdr->msg_namelen;
+	strlcpy(ev->event_data.send.prot_name, sock->sk->sk_prot->name,
+		       	sizeof(ev->event_data.send.prot_name));
+
+#ifdef KERN_COMM
+	get_task_comm(ev->event_data.send.comm, task);
+#endif
+
+#ifdef KERN_EXE
+	get_task_exe(ev->event_data.send.exe,
+		     sizeof(ev->event_data.send.exe) - 1, task);
+#endif
+
+#ifdef KERN_HOSTNAME
+	get_kernel_nodename(ev->event_data.send.nodename, sizeof(ev->event_data.send.nodename));
+#endif
+
+	ev->seq = atomic64_inc_return(&seq_exec_event);
+	preempt_disable();
+	ev->cpu = smp_processor_id();
+	preempt_enable();
+
+#ifdef EXEC_CACHE
+	if (++(event_cache->cnt) < g_num_cache_ev)
+		goto end;
+ events_send:
+#endif
+	memcpy(&msg->id, &cn_exec_id, sizeof(msg->id));
+	msg->ack = 0;		/* not used */
+	msg->flags = 0;		/* not used */
+#ifdef EXEC_CACHE
+	msg->len = sizeof(*ev) * event_cache->cnt;
+	__send_msg(msg);
+	event_cache->cnt = 0;
+ end:
+	mutex_unlock(&event_cache_mutex);
+#else
+	msg->len = sizeof(*ev);
+	send_msg(msg);
+#endif
+
+ real_sock_sendmsg:
+	ret = real_sock_sendmsg(sock, msghdr);
 	return ret;
 }
 #endif
@@ -1023,8 +1138,8 @@ static asmlinkage int fh_proc_exec_connector(struct task_struct *tsk)
 }
 
 #ifdef EVENT_KMOD
-static asmlinkage struct module* (*real_layout_and_allocate)(struct load_info *info, int flags) = NULL;
-static asmlinkage struct module* fh_layout_and_allocate(struct load_info *info, int flags)
+static asmlinkage struct module* (*real___audit_log_kern_module)(char *name) = NULL;
+static asmlinkage struct module* fh___audit_log_kern_module(char *name)
 {
 	struct cn_msg *msg;
 	struct exec_event *ev;
@@ -1033,10 +1148,10 @@ static asmlinkage struct module* fh_layout_and_allocate(struct load_info *info, 
 #endif
 #if LINUX_VERSION_CODE < KERNEL_VERSION(3, 15, 0)
 	if (atomic_read(&exec_event_num_listeners) < 1)
-		goto real_layout_and_allocate;
+		goto real___audit_log_kern_module;
 #else
 	if (atomic64_read(&portid_pid) < 1)
-		goto real_layout_and_allocate;
+		goto real___audit_log_kern_module;
 #endif
 
 #ifdef EXEC_CACHE
@@ -1055,7 +1170,7 @@ static asmlinkage struct module* fh_layout_and_allocate(struct load_info *info, 
 	ev->what = PROC_EVENT_KMOD;
 	ev->event_data.kmod.process_pid = current->pid;
 	ev->event_data.kmod.process_tgid = current->tgid;
-	strlcpy(ev->event_data.kmod.name, info->name, sizeof(ev->event_data.kmod.name));
+	strlcpy(ev->event_data.kmod.name, name, sizeof(ev->event_data.kmod.name));
 
 #ifdef KERN_HOSTNAME
 	get_kernel_nodename(ev->event_data.kmod.nodename, sizeof(ev->event_data.kmod.nodename));
@@ -1083,8 +1198,8 @@ static asmlinkage struct module* fh_layout_and_allocate(struct load_info *info, 
 	msg->len = sizeof(*ev);
 	send_msg(msg);
 #endif
-real_layout_and_allocate:
-	return real_layout_and_allocate(info, flags);
+real___audit_log_kern_module:
+	return real___audit_log_kern_module(name);
 }
 #endif
 #endif				// PTREGS_SYSCALL_STUBS
@@ -1116,6 +1231,11 @@ static struct ftrace_hook hooks[] = {
 #ifdef EVENT_CONNECT
 	HOOK("security_socket_connect", fh_ss_connect, &real_ss_connect),
 #endif
+
+#ifdef EVENT_SEND
+	HOOK("sock_sendmsg", fh_sock_sendmsg, &real_sock_sendmsg),
+#endif
+
 #ifdef EVENT_MMAP
 	HOOK("security_mmap_file", fh_security_mmap_file,
 	     &real_security_mmap_file),
@@ -1129,7 +1249,7 @@ static struct ftrace_hook hooks[] = {
 #endif
 
 #ifdef EVENT_KMOD
-	HOOK("layout_and_allocate", fh_layout_and_allocate, &real_layout_and_allocate),
+	HOOK("__audit_log_kern_module", fh___audit_log_kern_module, &real___audit_log_kern_module),
 #endif
 };
 

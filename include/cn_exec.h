@@ -31,6 +31,10 @@
 #define PROC_EVENT_KMOD 0x00002000
 #endif
 
+#ifdef  EVENT_SEND
+#define PROC_EVENT_SEND 0x00004000
+#endif
+
 #ifdef KERN_CRED
 struct exec_cred {
 	uid_t uid;
@@ -115,6 +119,27 @@ struct exec_event {
 			char nodename[__NEW_UTS_LEN+1];
 #endif
 		} connect;
+#endif
+
+#ifdef EVENT_SEND
+		struct __send_event {
+			__kernel_pid_t process_pid;
+			__kernel_pid_t process_tgid;
+			int family;
+			struct sockaddr addr;
+			int addrlen;
+			char prot_name[32];
+#ifdef KERN_COMM
+			char comm[16];
+#endif
+
+#ifdef KERN_EXE
+			char exe[MAX_LEN_EXE_NAME];
+#endif
+#ifdef KERN_HOSTNAME
+			char nodename[__NEW_UTS_LEN+1];
+#endif
+		} send;
 #endif
 
 #ifdef EVENT_MMAP

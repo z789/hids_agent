@@ -2,7 +2,7 @@ EXTRA_CFLAGS += $(CFLAGS) -I$(PWD)/../include  -Wall  -DUSE_FENTRY_OFFSET_0
 
 ifneq ($(KERNELRELEASE),)
         obj-m := cn_exec.o
-	cn_exec-y :=  cn_exec_connect.o ftrace_hook.o
+	cn_exec-y :=  cn_exec_connect.o ftrace_hook.o 
 else
         KDIR := /lib/modules/`uname -r`/build
 

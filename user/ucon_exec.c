@@ -323,6 +323,77 @@ static int out_event_connect(FILE * out, struct exec_event *ev)
 }
 #endif
 
+#ifdef EVENT_SEND
+static int out_event_send(FILE * out, struct exec_event *ev)
+{
+	int ret = -1;
+	pid_t pid = 0;
+	pid_t tgid = 0;
+	char *p_exe = NULL;
+	char exe[MAX_LEN_CMDLINE] = { 0 };
+
+	int family = 0;
+	struct sockaddr_in * addr;
+	struct sockaddr_in6 * addr6;
+	char addr_buf[64] = {0};
+	short port = 0;
+	//int addrlen = 0;
+
+	char nodename[1] = {0};
+	char *p_nodename = nodename;
+	char comm[1] = {0};
+	char *p_comm = comm;
+
+	if (!ev)
+		return ret;
+
+	pid = ev->event_data.send.process_pid;
+	tgid = ev->event_data.send.process_tgid;
+	family = ev->event_data.send.family;
+	if (family == AF_INET) {
+		addr = (struct sockaddr_in *)&(ev->event_data.send.addr);
+		inet_ntop(family, &addr->sin_addr, addr_buf, sizeof(addr_buf));
+		port = ntohs(addr->sin_port); 
+	} else if (family == AF_INET6) {
+		addr6 = (struct sockaddr_in6 *)&(ev->event_data.send.addr);
+		inet_ntop(family, &addr6->sin6_addr, addr_buf, sizeof(addr_buf));
+		port = ntohs(addr6->sin6_port); 
+	} else { 
+		return ret;
+	}
+	//addrlen = ev->event_data.send.addrlen;
+
+#ifdef KERN_EXE
+	p_exe = ev->event_data.send.exe;
+	if (p_exe[0] == '\0') {
+		get_exe(ev->event_data.send.process_pid, exe, sizeof(exe));
+		p_exe = exe;
+	}
+#else
+	get_exe(ev->event_data.send.process_pid, exe, sizeof(exe));
+	p_exe = exe;
+#endif
+
+#ifdef KERN_HOSTNAME
+	p_nodename = ev->event_data.send.nodename;
+#endif
+
+#ifdef KERN_COMM
+	p_comm = ev->event_data.send.comm;
+#endif
+
+	ret = fprintf(out,
+		    "%s monclock:%llu : SEND: node:%s pid:%d tgid:%d comm:%s exe:%s addr:%s:%d prot:%s\n",
+		    get_date(), ev->timestamp_ns, p_nodename, pid, tgid, p_comm, p_exe,
+		    addr_buf, port, ev->event_data.send.prot_name);
+
+	if (ret >= 0)
+		ret = 0;
+
+	return ret;
+}
+#endif
+
 #ifdef EVENT_PID_NS
 static int out_event_pid_ns(FILE * out, struct exec_event *ev)
 {
@@ -668,6 +739,13 @@ int main_loop(int s, FILE * out)
 					out_event_connect(out, ev);
 					break;
 #endif
+
+#ifdef EVENT_SEND
+				case PROC_EVENT_SEND:
+					out_event_send(out, ev);
+					break;
+#endif
+
 #ifdef EVENT_PID_NS
 				case PROC_EVENT_SETNS:
 					out_event_pid_ns(out, ev);
