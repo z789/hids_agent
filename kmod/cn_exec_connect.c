@@ -26,6 +26,7 @@
 #include <linux/user_namespace.h>
 #include <linux/utsname.h>
 #include <linux/rcupdate.h>
+#include <linux/refcount.h>
 #include <mount.h>
 #include <cn_exec.h>
 #include <ftrace_hook.h>
@@ -698,10 +699,17 @@ static asmlinkage int fh_ss_connect(struct socket *sock,
 #endif
 
 #ifdef EVENT_SEND
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 1, 0)
 static asmlinkage int (*real_sock_sendmsg)(struct socket *sock,
 	       				struct msghdr *msg) = NULL;
 static asmlinkage int fh_sock_sendmsg(struct socket *sock,
 	       				struct msghdr *msghdr)
+#else
+static asmlinkage int (*real_sock_sendmsg)(struct socket *sock,
+	       				struct msghdr *msg, size_t size) = NULL;
+static asmlinkage int fh_sock_sendmsg(struct socket *sock,
+	       				struct msghdr *msghdr, size_t size)
+#endif
 {
 	int ret;
 	//struct sockaddr_in *addr = (struct sockaddr_in *) address;
@@ -722,14 +730,26 @@ static asmlinkage int fh_sock_sendmsg(struct socket *sock,
 	if (atomic64_read(&portid_pid) < 1)
 		goto real_sock_sendmsg;
 #endif
-	if (sk->sk_kern_sock || sk->sk_protocol != IPPROTO_UDP
+
+	if (
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
+           sk->sk_kern_sock ||
+#else
+           sk == p_cdev->nls ||
+#endif
+           sk->sk_protocol != IPPROTO_UDP
 	       || sk->sk_state == TCP_ESTABLISHED || inet->inet_num 
 	       || msghdr->msg_name == NULL)
 		goto real_sock_sendmsg;
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 13, 0)
 	/* first send msg */
 	if (refcount_read(&sk->sk_wmem_alloc) != 1)
 		goto real_sock_sendmsg;
+#else
+	if (atomic_read(&sk->sk_wmem_alloc) != 1)
+		goto real_sock_sendmsg;
+#endif
 
 	if (family != AF_INET && family != AF_INET6)
 		goto real_sock_sendmsg;
@@ -798,7 +818,11 @@ static asmlinkage int fh_sock_sendmsg(struct socket *sock,
 #endif
 
  real_sock_sendmsg:
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 1, 0)
 	ret = real_sock_sendmsg(sock, msghdr);
+#else
+	ret = real_sock_sendmsg(sock, msghdr, size);
+#endif
 	return ret;
 }
 #endif
